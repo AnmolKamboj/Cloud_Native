@@ -1,19 +1,21 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for
+from flask import Flask, render_template, request, redirect, url_for, Response
 from google.cloud import storage
 import google.generativeai as genai
 import json
+import io
 
 app = Flask(__name__)
 
 # Google Cloud Storage configuration
-BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "cloudnativeproject1")
+BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+if not BUCKET_NAME:
+    raise ValueError("GCS_BUCKET_NAME environment variable is not set")
 client = storage.Client()
 
 # Configure Gemini API
 genai.configure(api_key=os.environ['GEMINI_API'])
 
-# Initialize the model
 model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
 # Define the prompt
@@ -36,15 +38,15 @@ def generate_image_description(image_path, mime_type):
         response = model.generate_content(
             [{"mime_type": mime_type, "data": image_data}, PROMPT]
         )
-        print("Gemini API Response (Raw):", response.text)  # Debug: Print the raw response
+        print("Gemini API Response (Raw):", response.text) 
 
         # Remove the triple backticks and "json" marker from the response
         cleaned_response = response.text.strip().strip("```json").strip("```").strip()
-        print("Cleaned Response:", cleaned_response)  # Debug: Print the cleaned response
+        print("Cleaned Response:", cleaned_response) 
 
         # Parse the cleaned response as JSON
         description_data = json.loads(cleaned_response)
-        print("Parsed JSON:", description_data)  # Debug: Print the parsed JSON
+        print("Parsed JSON:", description_data) 
 
         return json.dumps(description_data, indent=4)  # Return pretty-printed JSON
     except json.JSONDecodeError as e:
@@ -74,7 +76,6 @@ def home():
         if file:
             # Generate a unique filename
             filename = file.filename
-            # Save the file temporarily
             temp_path = f"/tmp/{filename}"
             file.save(temp_path)
 
@@ -86,7 +87,6 @@ def home():
             # Generate description using Gemini API
             description = generate_image_description(temp_path, file.mimetype)
             if description:
-                # Save the description as a JSON file in GCS
                 save_description_to_gcs(BUCKET_NAME, filename, description)
 
             # Clean up the temporary file
@@ -116,8 +116,20 @@ def view_image(filename):
     else:
         description_data = {"title": "Untitled", "description": "No description available."}
 
-    image_url = f"https://storage.googleapis.com/{BUCKET_NAME}/{filename}"
+    # Serve the image directly from GCS
+    image_blob = bucket.blob(filename)
+    image_data = image_blob.download_as_bytes()
+    image_url = f"/images/{filename}"
+
     return render_template("view_image.html", image_url=image_url, title=description_data["title"], description=description_data["description"])
+
+@app.route("/images/<filename>")
+def get_image(filename):
+    """Route to serve images directly from GCS."""
+    bucket = client.bucket(BUCKET_NAME)
+    blob = bucket.blob(filename)
+    file_data = blob.download_as_bytes()
+    return Response(io.BytesIO(file_data), mimetype='image/jpeg')
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
